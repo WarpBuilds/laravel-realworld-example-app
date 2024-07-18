@@ -1,0 +1,79 @@
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  php-version: 8.0
+  php-extensions: dom, curl, libxml, mbstring, zip, pcntl, pdo, sqlite, pdo_sqlite, bcmath, soap, intl, gd, exif, iconv
+  laravel-version: ^8.65
+  node-version: 18.x
+  pnpm-version: 9
+
+jobs:
+  integration-tests:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, warp-ubuntu-latest-x64-8x]
+    timeout-minutes: 10
+    runs-on: ${{ matrix.os }}
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: password
+          MYSQL_DATABASE: test
+        ports:
+          - 3306/tcp
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Cache PHP extensions
+        id: cache-env
+        uses: shivammathur/cache-extensions@v1
+        with:
+          php-version: ${{ env.php-version }}
+          extensions: ${{ env.php-extensions }}
+          key: php-extensions-cache-v1
+      - name: Get composer cache directory
+        run: |
+          echo "COMPOSER_CACHE_FILES_DIR=$(composer config cache-files-dir)" >> $GITHUB_ENV
+      - name: Cache Composer dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.COMPOSER_CACHE_FILES_DIR }}
+          key: php-${{ env.php-version }}-${{ hashFiles('composer.lock') }}
+          restore-keys: |
+            php-${{ env.php-version }}-
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.php-version }}
+          extensions: ${{ env.php-extensions }}
+          coverage: xdebug
+      - name: Prepare Laravel Application
+        run: cp .env.example .env
+      - name: Setup problem matchers
+        run: |
+          echo "::add-matcher::${{ runner.tool_cache }}/php.json"
+          echo "::add-matcher::${{ runner.tool_cache }}/phpunit.json"
+      - name: Install dependencies
+        run: |
+          composer require "laravel/framework:${{ env.laravel-version }}" --no-interaction --no-update
+          composer update --prefer-stable --prefer-dist --no-interaction -W
+      - name: Generate App Key
+        run: php artisan key:generate
+      - name: Execute tests
+        run: vendor/bin/pest --coverage --parallel --fail-on-risky
+        env:
+          DB_PORT: ${{ job.services.mysql.ports[3306] }}
+          DB_USERNAME: root
+          DB_DATABASE: test
+          DB_PASSWORD: password
+          # PASSPORT_PRIVATE_KEY: ${{ secrets.PASSPORT_PRIVATE_KEY }}
+          # PASSPORT_PUBLIC_KEY: ${{ secrets.PASSPORT_PUBLIC_KEY }}
+      - name: Dump logs
+        if: failure()
+        run: cat storage/logs/laravel.log || true
